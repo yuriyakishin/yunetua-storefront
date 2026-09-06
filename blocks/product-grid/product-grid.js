@@ -1,23 +1,30 @@
 import { CORE_FETCH_GRAPHQL } from '../../scripts/commerce.js';
 
-const PRODUCTS_QUERY = `
-  query {
-    products(search: "", pageSize: 12) {
-      items {
-        name
-        sku
-        small_image { url }
-        price_range {
-          minimum_price {
-            regular_price { value currency }
+function buildQuery(pageSize) {
+  return `
+    query {
+      products(search: "", pageSize: ${pageSize}) {
+        items {
+          name
+          sku
+          small_image { url }
+          price_range {
+            minimum_price {
+              regular_price { value currency }
+            }
           }
         }
       }
     }
-  }
-`;
+  `;
+}
 
 export default async function decorate(block) {
+  // Optional first row in the authored table can specify how many
+  // products to show, e.g. a single cell containing "4".
+  const paramText = block.children[0]?.textContent.trim();
+  const pageSize = paramText && !Number.isNaN(Number(paramText)) ? Number(paramText) : 12;
+
   block.textContent = '';
 
   const loading = document.createElement('p');
@@ -27,7 +34,7 @@ export default async function decorate(block) {
   let data;
   let errors;
   try {
-    ({ data, errors } = await CORE_FETCH_GRAPHQL.fetchGraphQl(PRODUCTS_QUERY));
+    ({ data, errors } = await CORE_FETCH_GRAPHQL.fetchGraphQl(buildQuery(pageSize)));
   } catch (e) {
     loading.textContent = `Failed to load products: ${e.message}`;
     return;
