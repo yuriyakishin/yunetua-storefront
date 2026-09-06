@@ -1,9 +1,51 @@
 import { CORE_FETCH_GRAPHQL } from '../../scripts/commerce.js';
 
-function buildQuery(pageSize) {
+const CATEGORY_ID_QUERY = `
+  query($name: String!) {
+    categories(filters: { name: { match: $name } }) {
+      items { id name }
+    }
+  }
+`;
+
+const SORT_MAP = {
+  'price-asc': '{ price: ASC }',
+  'price-desc': '{ price: DESC }',
+  'name-asc': '{ name: ASC }',
+  'name-desc': '{ name: DESC }',
+};
+
+// Parses authored rows of the shape "key: value" into a config object.
+// Order of rows doesn't matter, and unrecognized keys are ignored —
+// authors can freely combine any supported parameters in da.live
+// without needing a code change for new combinations.
+function parseBlockConfig(block) {
+  const config = {};
+  [...block.children].forEach((row) => {
+    const text = row.textContent.trim();
+    const separatorIndex = text.indexOf(':');
+    if (separatorIndex === -1) return;
+    const key = text.slice(0, separatorIndex).trim().toLowerCase();
+    const value = text.slice(separatorIndex + 1).trim();
+    if (key && value) config[key] = value;
+  });
+  return config;
+}
+
+async function resolveCategoryId(categoryName) {
+  const { data, errors } = await CORE_FETCH_GRAPHQL.fetchGraphQl(CATEGORY_ID_QUERY, {
+    variables: { name: categoryName },
+  });
+  if (errors || !data.categories.items.length) return null;
+  return data.categories.items[0].id;
+}
+
+function buildProductsQuery({ pageSize, categoryId, sort }) {
+  const filter = categoryId ? `filter: { category_id: { eq: "${categoryId}" } },` : '';
+  const sortClause = sort ? `sort: ${sort},` : '';
   return `
     query {
-      products(search: "", pageSize: ${pageSize}) {
+      products(search: "", ${filter} ${sortClause} pageSize: ${pageSize}) {
         items {
           name
           sku
@@ -13,6 +55,11 @@ function buildQuery(pageSize) {
               regular_price { value currency }
             }
           }
+          ... on ConfigurableProduct {
+            variants {
+              product { sku }
+            }
+          }
         }
       }
     }
@@ -20,10 +67,17 @@ function buildQuery(pageSize) {
 }
 
 export default async function decorate(block) {
-  // Optional first row in the authored table can specify how many
-  // products to show, e.g. a single cell containing "4".
-  const paramText = block.children[0]?.textContent.trim();
-  const pageSize = paramText && !Number.isNaN(Number(paramText)) ? Number(paramText) : 12;
+  // Authored rows use "key: value" syntax, one per row, any order:
+  //   count: 4
+  //   category: Watches
+  //   sort: price-asc | price-desc | name-asc | name-desc
+  const config = parseBlockConfig(block);
+
+  const urlParams = new URLSearchParams(window.location.search);
+  const categoryIdFromUrl = urlParams.get('category');
+
+  const pageSize = config.count && !Number.isNaN(Number(config.count)) ? Number(config.count) : 12;
+  const sort = SORT_MAP[config.sort] || null;
 
   block.textContent = '';
 
@@ -31,10 +85,19 @@ export default async function decorate(block) {
   loading.textContent = 'Loading products...';
   block.append(loading);
 
+  let categoryId = categoryIdFromUrl;
+  if (!categoryId && config.category) {
+    try {
+      categoryId = await resolveCategoryId(config.category);
+    } catch (e) {
+      // fall through, show all products if category lookup fails
+    }
+  }
+
   let data;
   let errors;
   try {
-    ({ data, errors } = await CORE_FETCH_GRAPHQL.fetchGraphQl(buildQuery(pageSize)));
+    ({ data, errors } = await CORE_FETCH_GRAPHQL.fetchGraphQl(buildProductsQuery({ pageSize, categoryId, sort })));
   } catch (e) {
     loading.textContent = `Failed to load products: ${e.message}`;
     return;
@@ -46,6 +109,13 @@ export default async function decorate(block) {
   }
 
   block.textContent = '';
+
+  if (config.category) {
+    const heading = document.createElement('h2');
+    heading.textContent = config.category;
+    block.append(heading);
+  }
+
   const grid = document.createElement('div');
   grid.className = 'product-grid-items';
 
@@ -86,7 +156,18 @@ export default async function decorate(block) {
       addButton.textContent = 'Adding...';
       try {
         const { addProductsToCart } = await import('@dropins/storefront-cart/api.js');
-        await addProductsToCart([{ sku: product.sku, quantity: 1 }]);
+        const firstVariantSku = product.variants?.[0]?.product?.sku;
+
+        if (firstVariantSku) {
+          await addProductsToCart([{
+            sku: firstVariantSku,
+            parentSku: product.sku,
+            quantity: 1,
+          }]);
+        } else {
+          await addProductsToCart([{ sku: product.sku, quantity: 1 }]);
+        }
+
         addButton.textContent = 'Added ✓';
         setTimeout(() => {
           addButton.textContent = 'Add to Cart';
